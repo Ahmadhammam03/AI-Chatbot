@@ -5,78 +5,62 @@ import os
 import sys
 import threading
 import time
-import logging
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import requests
+import zipfile
 
 # Add project path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-try:
-    from utils.similarity_checker import SimilarityChecker
-    from utils.response_generator import ResponseGenerator
-except ImportError as e:
-    logger.error(f"Import error: {e}")
-    # Continue anyway for deployment
+# 💾 Download model from Google Drive if not found
+def download_and_extract_model():
+    model_dir = './models/galaxy_alibaba_chatbot'
+    if os.path.exists(model_dir):
+        print("✅ Model already exists. Skipping download.")
+        return
+
+    zip_url = "https://drive.google.com/uc?export=download&id=1f6z0Tf61SUOnBaBEwNQgASfRLo2c2LC7"
+    zip_path = "models.zip"
+
+    print("📦 Downloading model from Google Drive...")
+    r = requests.get(zip_url)
+    with open(zip_path, 'wb') as f:
+        f.write(r.content)
+    print("📂 Extracting model files...")
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall('./models')
+    print("✅ Model downloaded and extracted.")
+
+download_and_extract_model()
+
+from utils.similarity_checker import SimilarityChecker
+from utils.response_generator import ResponseGenerator
 
 app = Flask(__name__)
 CORS(app)
 
-# Configuration
 MODEL_PATH = './models/galaxy_alibaba_chatbot'
 QA_DATABASE_PATH = './data/processed_data.json'
 
-# Azure timeout (shorter for cloud)
-AZURE_TIMEOUT = 10
+print("Initializing chatbot components...")
+similarity_checker = SimilarityChecker()
+response_generator = ResponseGenerator(MODEL_PATH)
 
-# Global variables
-similarity_checker = None
-response_generator = None
-qa_database = None
+with open(QA_DATABASE_PATH, 'r', encoding='utf-8') as f:
+    qa_database = json.load(f)
+print(f"✅ Loaded {len(qa_database)} Q&A pairs")
 
-def initialize_components():
-    """Initialize components with error handling"""
-    global similarity_checker, response_generator, qa_database
-    
-    try:
-        logger.info("🚀 Initializing chatbot components...")
-        
-        # Initialize similarity checker
-        similarity_checker = SimilarityChecker()
-        logger.info("✅ Similarity checker loaded")
-        
-        # Initialize response generator
-        response_generator = ResponseGenerator(MODEL_PATH)
-        logger.info("✅ Response generator loaded")
-        
-        # Load Q&A database
-        with open(QA_DATABASE_PATH, 'r', encoding='utf-8') as f:
-            qa_database = json.load(f)
-        logger.info(f"✅ Loaded {len(qa_database)} Q&A pairs")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize: {e}")
-        return False
-
-# Keywords for relevance checking
 RELEVANT_KEYWORDS = [
     'galaxy', 'organisation', 'organization', 'alibaba', 'cloud',
     'certification', 'jordan', 'amman', 'recycling', 'empowerment',
     'training', 'aca', 'acp', 'ace', 'nonprofit', 'women', 'kids'
 ]
 
-# Trained greetings
 TRAINED_GREETINGS = [
     'hi', 'hello', 'good morning', 'hey', 'good afternoon', 
     'hi there', 'good evening', 'morning', 'hello!', 'hey there',
     'greetings', 'hi chatbot', "what's up", 'hi, i need help', 'good day'
 ]
 
-# Thank you messages
 THANK_YOU_MESSAGES = [
     'thank you', 'thanks', 'thank you so much', 'thanks a lot',
     'thank you very much', 'appreciate it', 'thanks for your help',
@@ -86,73 +70,44 @@ THANK_YOU_MESSAGES = [
 ]
 
 def is_special_message(message):
-    """Check if message is greeting or thank you"""
     message_lower = message.lower().strip()
-    
-    if message_lower in TRAINED_GREETINGS:
-        return True
-    
-    if any(phrase in message_lower for phrase in THANK_YOU_MESSAGES):
-        return True
-    
-    return False
+    return message_lower in TRAINED_GREETINGS or any(phrase in message_lower for phrase in THANK_YOU_MESSAGES)
 
-def generate_with_timeout(response_generator, user_message, similar_qa, timeout=AZURE_TIMEOUT):
-    """Generate response with timeout"""
+def generate_with_timeout(response_generator, user_message, similar_qa, timeout=45):
     result = [None]
     exception = [None]
-    
     def target():
         try:
             result[0] = response_generator.generate_response(user_message, similar_qa)
         except Exception as e:
             exception[0] = e
-    
     thread = threading.Thread(target=target)
     thread.daemon = True
     thread.start()
     thread.join(timeout)
-    
-    if thread.is_alive():
-        logger.warning(f"⚠️ Generation timed out after {timeout} seconds")
+    if thread.is_alive() or exception[0]:
+        print("⚠️ Generation failed or timed out")
         return None
-    
-    if exception[0]:
-        logger.warning(f"⚠️ Generation failed: {exception[0]}")
-        return None
-        
     return result[0]
 
 def get_fallback_response(user_message, similar_qa):
-    """Generate fallback response when model fails"""
-    
-    if similar_qa and len(similar_qa) > 0:
-        best_match = similar_qa[0]
-        if best_match[1] > 0.6:
-            return best_match[0]['completion']
-    
+    if similar_qa and len(similar_qa) > 0 and similar_qa[0][1] > 0.6:
+        return similar_qa[0][0]['completion']
     question_lower = user_message.lower()
-    
     if any(word in question_lower for word in ['galaxy', 'organisation', 'organization']):
         return "Galaxy Organisation is a nonprofit organization based in Jordan that focuses on empowerment through technology training and cloud certifications."
-    
     elif any(word in question_lower for word in ['location', 'where', 'based', 'located']):
         return "Galaxy Organisation is located in Amman, Jordan."
-    
     elif any(word in question_lower for word in ['alibaba', 'cloud']):
-        return "Alibaba Cloud is a leading cloud service provider. Galaxy Organisation offers comprehensive training and certification programs for Alibaba Cloud services."
-    
+        return "Alibaba Cloud is a leading cloud service provider..."
     elif any(word in question_lower for word in ['certification', 'aca', 'acp', 'ace']):
-        return "Galaxy Organisation provides Alibaba Cloud certification training including Associate (ACA), Professional (ACP), and Expert (ACE) levels."
-    
+        return "Galaxy Organisation provides Alibaba Cloud certification training..."
     elif any(word in question_lower for word in ['training', 'program', 'course']):
-        return "Galaxy Organisation offers various training programs including Alibaba Cloud certifications and technology skills development."
-    
+        return "Galaxy Organisation offers various training programs..."
     elif any(word in question_lower for word in ['contact', 'reach', 'phone', 'email']):
-        return "You can contact Galaxy Organisation through their official channels for more information about programs and enrollment."
-    
+        return "You can contact Galaxy Organisation through their official channels."
     else:
-        return "I specialize in questions about Galaxy Organisation and Alibaba Cloud services. Could you please ask about our training programs, certifications, or services?"
+        return "I specialize in Galaxy Organisation and Alibaba Cloud—please ask about programs or services."
 
 @app.route('/')
 def home():
@@ -161,118 +116,57 @@ def home():
 @app.route('/chat', methods=['POST'])
 def chat():
     start_time = time.time()
-    
-    # Check if components are initialized
-    if not all([similarity_checker, response_generator, qa_database]):
-        return jsonify({
-            'response': 'Chatbot is starting up. Please try again in a moment.',
-            'status': 'initializing'
-        }), 503
-    
     try:
         data = request.json
         user_message = data.get('message', '').strip()
-
         if not user_message:
-            return jsonify({
-                'response': 'Please ask a question about Galaxy Organisation or Alibaba.',
-                'status': 'error'
-            })
+            return jsonify({'response': 'Please ask a question.', 'status': 'error'})
 
-        logger.info(f"📝 Processing: {user_message}")
-
-        # Check for special messages
-        is_greeting = user_message.lower().strip() in TRAINED_GREETINGS
-        is_thanks = any(phrase in user_message.lower().strip() for phrase in THANK_YOU_MESSAGES)
-        is_special = is_greeting or is_thanks
-        
-        # Check relevance (skip for special messages)
+        print(f"📝 Processing: {user_message}")
+        is_special = is_special_message(user_message)
         if not is_special and not similarity_checker.is_relevant_question(user_message.lower(), RELEVANT_KEYWORDS):
             return jsonify({
-                'response': 'I specialize in questions about Galaxy Organisation and Alibaba. Please ask about their programs, services, or certifications.',
+                'response': 'Please ask about Galaxy Organisation or Alibaba services.',
                 'status': 'irrelevant'
             })
 
-        # Find similar Q&As
-        similar_qa = similarity_checker.find_similar_qa(
-            user_message, qa_database, top_k=3, threshold=0.7
-        )
-
-        # Handle special messages
-        if is_special:
-            message_type = "greeting" if is_greeting else "thank you"
-            logger.info(f"🎯 Special message: {message_type}")
-            force_generation = True
-        else:
-            force_generation = False
-
-        # Generate or use exact match
+        similar_qa = similarity_checker.find_similar_qa(user_message, qa_database, top_k=3, threshold=0.7)
+        force_generation = is_special
         if not force_generation and similar_qa and similar_qa[0][1] > 0.9:
             response = similar_qa[0][0]['completion']
             status = 'exact_match'
         else:
-            logger.info("🤖 Generating response...")
-            
-            response = generate_with_timeout(
-                response_generator, user_message, similar_qa
-            )
-            
-            if response is None:
-                logger.warning("⚠️ Using fallback")
+            response = generate_with_timeout(response_generator, user_message, similar_qa, timeout=10)
+            if response is None or len(response.strip()) < 5:
                 response = get_fallback_response(user_message, similar_qa)
                 status = 'fallback'
             else:
                 status = 'generated'
 
-        # Ensure response exists
-        if not response or len(response.strip()) < 5:
-            response = get_fallback_response(user_message, similar_qa)
-            status = 'fallback'
-
-        processing_time = time.time() - start_time
-        logger.info(f"⏱️ Processing time: {processing_time:.2f}s")
-
+        processing_time = round(time.time() - start_time, 2)
         return jsonify({
             'response': response,
             'status': status,
             'confidence': similar_qa[0][1] if similar_qa else 0.0,
-            'processing_time': round(processing_time, 2)
+            'processing_time': processing_time
         })
 
     except Exception as e:
-        processing_time = time.time() - start_time
-        logger.error(f"❌ Error: {str(e)}")
-        
+        print(f"❌ Error: {e}")
         return jsonify({
-            'response': 'Sorry, I encountered an error. Please try again.',
-            'status': 'error'
-        }), 500
+            'response': 'Sorry, something went wrong.',
+            'status': 'error',
+            'error': str(e)
+        })
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check for Azure"""
-    if not all([similarity_checker, response_generator, qa_database]):
-        return jsonify({
-            'status': 'unhealthy',
-            'model_loaded': False
-        }), 503
-    
     return jsonify({
-        'status': 'healthy', 
+        'status': 'healthy',
         'model_loaded': True,
-        'qa_pairs': len(qa_database) if qa_database else 0
+        'qa_pairs': len(qa_database)
     })
 
-# Initialize when starting
 if __name__ == '__main__':
-    success = initialize_components()
-    if success:
-        logger.info("🚀 Starting server...")
-        # Use port from environment (Azure uses this)
-        port = int(os.environ.get('PORT', 5000))
-        app.run(debug=False, host='0.0.0.0', port=port)
-    else:
-        logger.error("❌ Failed to start")
-        # Start anyway with limited functionality
-        port = int(os.environ.get('PORT', 5000))
-        app.run(debug=False, host='0.0.0.0', port=port)
+    print("🚀 Starting server...")
+    app.run(debug=True, host='0.0.0.0', port=5000)
