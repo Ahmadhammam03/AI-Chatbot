@@ -1,0 +1,39 @@
+name: Deploy to Azure Web App
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.9'
+    
+    - name: Create models directory
+      run: mkdir -p models/galaxy_alibaba_chatbot
+    
+    - name: Download model from Google Drive
+      run: |
+        pip install gdown
+        gdown --fuzzy https://drive.google.com/file/d/1f6z0Tf61SUOnBaBEwNQgASfRLo2c2LC7/view -O models.zip
+        unzip models.zip -d models/
+        rm models.zip
+    
+    - name: Create deployment package
+      run: |
+        zip -r deploy.zip . -x "*.git*" -x "*.pyc" -x "__pycache__/*"
+    
+    - name: Deploy to Azure Web App
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: 'galaxychatbot2025'
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        package: deploy.zip
